@@ -1,4 +1,4 @@
-import { AbortController, AbortSignal } from 'abort-controller';
+import AbortController from 'abort-controller';
 import { fromByteArray, toByteArray } from 'base64-js';
 import {
   EmitterSubscription,
