@@ -15,9 +15,6 @@ import com.facebook.react.modules.core.DeviceEventManagerModule;
 
 import java.util.HashMap;
 import java.util.Map;
-import java.util.concurrent.Executor;
-import java.util.concurrent.Executors;
-import java.util.concurrent.TimeUnit;
 
 import io.grpc.CallOptions;
 import io.grpc.ClientCall;
@@ -28,335 +25,258 @@ import io.grpc.MethodDescriptor;
 import io.grpc.Status;
 
 public class GrpcModule extends ReactContextBaseJavaModule {
-  private final ReactApplicationContext context;
-  private final HashMap<Integer, ClientCall> callsMap = new HashMap<>();
-  private final HashMap<Integer, GrpcConnection> connections = new HashMap<>();
-  private final Executor executor = Executors.newFixedThreadPool(Runtime.getRuntime().availableProcessors());
+    private final ReactApplicationContext context;
+    private final HashMap<Integer, ClientCall> callsMap = new HashMap<>();
 
-  public GrpcModule(ReactApplicationContext context) {
-    this.context = context;
-  }
+    private String host;
+    private boolean isInsecure = false;
+    private Integer responseSizeLimit = null;
+    private ManagedChannel managedChannel = null;
 
-  @NonNull
-  @Override
-  public String getName() {
-    return "Grpc";
-  }
-
-
-  @ReactMethod
-  public void setGrpcSettings(int id, ReadableMap settings) {
-    this.destroyClient(id);
-
-    ManagedChannel channel = this.createManagedChannel(id, settings);
-
-    this.connections.put(id, new GrpcConnection(channel, settings));
-  }
-
-  @ReactMethod
-  public void unaryCall(int callId, Integer id, String path, ReadableMap obj, ReadableMap headers, final Promise promise) {
-    ClientCall call;
-
-    try {
-      call = this.startGrpcCall(callId, id, path, MethodDescriptor.MethodType.UNARY, headers);
-    } catch (Exception e) {
-      promise.reject(e);
-
-      return;
+    public GrpcModule(ReactApplicationContext context) {
+        this.context = context;
     }
 
-    byte[] data = Base64.decode(obj.getString("data"), Base64.NO_WRAP);
-
-    call.sendMessage(data);
-    call.request(1);
-    call.halfClose();
-
-    callsMap.put(id, call);
-
-    promise.resolve(null);
-  }
-
-  @ReactMethod
-  public void serverStreamingCall(int id, int clientId, String path, ReadableMap obj, ReadableMap headers, final Promise promise) {
-    ClientCall call;
-
-    try {
-      call = this.startGrpcCall(id, clientId, path, MethodDescriptor.MethodType.SERVER_STREAMING, headers);
-    } catch (Exception e) {
-      promise.reject(e);
-
-      return;
+    @NonNull
+    @Override
+    public String getName() {
+        return "Grpc";
     }
 
-    byte[] data = Base64.decode(obj.getString("data"), Base64.NO_WRAP);
-
-    call.sendMessage(data);
-    call.request(1);
-    call.halfClose();
-
-    callsMap.put(id, call);
-
-    promise.resolve(null);
-  }
-
-  @ReactMethod
-  public void clientStreamingCall(int id, int clientId, String path, ReadableMap obj, ReadableMap headers, final Promise promise) {
-    ClientCall call = callsMap.get(id);
-
-    if (call == null) {
-      try {
-        call = this.startGrpcCall(id, clientId, path, MethodDescriptor.MethodType.CLIENT_STREAMING, headers);
-      } catch (Exception e) {
-        promise.reject(e);
-
-        return;
-      }
-
-      callsMap.put(id, call);
+    @ReactMethod()
+    public void getHost(final Promise promise) {
+        promise.resolve(this.host);
     }
 
-    byte[] data = Base64.decode(obj.getString("data"), Base64.NO_WRAP);
-
-    call.sendMessage(data);
-    call.request(1);
-
-    promise.resolve(null);
-  }
-
-  @ReactMethod
-  public void finishClientStreaming(int id, final Promise promise) {
-    if (callsMap.containsKey(id)) {
-      ClientCall call = callsMap.get(id);
-
-      call.halfClose();
-
-      promise.resolve(true);
-    } else {
-      promise.resolve(false);
-    }
-  }
-
-  @ReactMethod
-  public void cancelGrpcCall(int id, final Promise promise) {
-    if (callsMap.containsKey(id)) {
-      ClientCall call = callsMap.get(id);
-      call.cancel("Cancelled", new Exception("Cancelled by app"));
-
-      promise.resolve(true);
-    } else {
-      promise.resolve(false);
-    }
-  }
-
-  private ClientCall startGrpcCall(int callId, int clientId, String path, MethodDescriptor.MethodType methodType, ReadableMap headers) throws Exception {
-    if (!this.connections.containsKey(clientId)) {
-      throw new Exception("Channel not created");
+    @ReactMethod()
+    public void getIsInsecure(final Promise promise) {
+        promise.resolve(this.isInsecure);
     }
 
-    GrpcConnection connection = this.connections.get(clientId);
-    ReadableMap settings = connection.getSettings();
-    ManagedChannel channel = connection.getChannel();
-
-    path = normalizePath(path);
-
-    final Metadata headersMetadata = new Metadata();
-
-    for (Map.Entry<String, Object> headerEntry : headers.toHashMap().entrySet()) {
-      headersMetadata.put(Metadata.Key.of(headerEntry.getKey(), Metadata.ASCII_STRING_MARSHALLER), headerEntry.getValue().toString());
+    @ReactMethod
+    public void setHost(String host) {
+        this.host = host;
     }
 
-    MethodDescriptor.Marshaller<byte[]> marshaller = new GrpcMarshaller();
-
-    MethodDescriptor descriptor = MethodDescriptor.<byte[], byte[]>newBuilder()
-      .setFullMethodName(path)
-      .setType(methodType)
-      .setRequestMarshaller(marshaller)
-      .setResponseMarshaller(marshaller)
-      .build();
-
-    CallOptions callOptions = CallOptions.DEFAULT;
-
-    if (settings.hasKey("requestTimeout")) {
-      int callTimeout = settings.getInt("requestTimeout");
-
-      callOptions = callOptions.withDeadlineAfter(callTimeout, TimeUnit.MILLISECONDS);
+    @ReactMethod
+    public void setInsecure(boolean insecure) {
+        this.isInsecure = insecure;
     }
 
-    if (settings.hasKey("compressionName")) {
-      callOptions = callOptions.withCompression(settings.getString("compressionName"));
+    @ReactMethod
+    public void setResponseSizeLimit(int limit) {
+        this.responseSizeLimit = limit;
     }
 
-    ClientCall call = channel.newCall(descriptor, callOptions);
+    @ReactMethod
+    public void unaryCall(int id, String path, ReadableMap obj, ReadableMap headers, final Promise promise) {
+        ClientCall call = this.startGrpcCall(id, path, MethodDescriptor.MethodType.UNARY, headers);
 
-    call.start(new ClientCall.Listener() {
-      @Override
-      public void onHeaders(Metadata headers) {
-        super.onHeaders(headers);
+        byte[] data = Base64.decode(obj.getString("data"), Base64.NO_WRAP);
 
-        WritableMap event = Arguments.createMap();
-        WritableMap payload = Arguments.createMap();
+        call.sendMessage(data);
+        call.request(1);
+        call.halfClose();
 
-        for (String key : headers.keys()) {
-          if (key.endsWith(Metadata.BINARY_HEADER_SUFFIX)) {
-            byte[] data = headers.get(Metadata.Key.of(key, Metadata.BINARY_BYTE_MARSHALLER));
+        callsMap.put(id, call);
 
-            payload.putString(key, new String(Base64.encode(data, Base64.NO_WRAP)));
-          } else if (!key.startsWith(":")) {
-            String data = headers.get(Metadata.Key.of(key, Metadata.ASCII_STRING_MARSHALLER));
+        promise.resolve(null);
+    }
 
-            payload.putString(key, data);
-          }
+    @ReactMethod
+    public void serverStreamingCall(int id, String path, ReadableMap obj, ReadableMap headers, final Promise promise) {
+        ClientCall call = this.startGrpcCall(id, path, MethodDescriptor.MethodType.SERVER_STREAMING, headers);
+
+        byte[] data = Base64.decode(obj.getString("data"), Base64.NO_WRAP);
+
+        call.sendMessage(data);
+        call.request(1);
+        call.halfClose();
+
+        callsMap.put(id, call);
+
+        promise.resolve(null);
+    }
+
+    @ReactMethod
+    public void clientStreamingCall(int id, String path, ReadableMap obj, ReadableMap headers, final Promise promise) {
+        ClientCall call = callsMap.get(id);
+
+        if (call == null) {
+            call = this.startGrpcCall(id, path, MethodDescriptor.MethodType.CLIENT_STREAMING, headers);
+
+            callsMap.put(id, call);
         }
 
-        event.putInt("id", callId);
-        event.putString("type", "headers");
-        event.putMap("payload", payload);
+        byte[] data = Base64.decode(obj.getString("data"), Base64.NO_WRAP);
 
-        emitEvent("grpc-call", event);
-      }
+        call.sendMessage(data);
+        call.request(1);
 
-      @Override
-      public void onMessage(Object messageObj) {
-        super.onMessage(messageObj);
+        promise.resolve(null);
+    }
 
-        byte[] data = (byte[]) messageObj;
+    @ReactMethod
+    public void finishClientStreaming(int id, final Promise promise) {
+        if (callsMap.containsKey(id)) {
+            ClientCall call = callsMap.get(id);
 
-        WritableMap event = Arguments.createMap();
+            call.halfClose();
 
-        event.putInt("id", callId);
-        event.putString("type", "response");
-        event.putString("payload", Base64.encodeToString(data, Base64.NO_WRAP));
-
-        emitEvent("grpc-call", event);
-
-        if (methodType == MethodDescriptor.MethodType.SERVER_STREAMING) {
-          call.request(1);
+            promise.resolve(true);
+        } else {
+            promise.resolve(false);
         }
-      }
+    }
 
-      @Override
-      public void onClose(Status status, Metadata trailers) {
-        super.onClose(status, trailers);
+    @ReactMethod
+    public void cancelGrpcCall(int id, final Promise promise) {
+        if (callsMap.containsKey(id)) {
+            ClientCall call = callsMap.get(id);
+            call.cancel("Cancelled", new Exception("Cancelled by app"));
 
-        callsMap.remove(callId);
+            promise.resolve(true);
+        } else {
+            promise.resolve(false);
+        }
+    }
 
-        WritableMap trailersEvent = Arguments.createMap();
-        WritableMap trailersMap = Arguments.createMap();
+    private ClientCall startGrpcCall(int id, String path, MethodDescriptor.MethodType methodType, ReadableMap headers) {
+        path = normalizePath(path);
 
-        trailersEvent.putInt("id", callId);
-        trailersEvent.putString("type", "trailers");
+        final Metadata headersMetadata = new Metadata();
 
-        for (String key : trailers.keys()) {
-          if (key.endsWith(Metadata.BINARY_HEADER_SUFFIX)) {
-            byte[] data = trailers.get(Metadata.Key.of(key, Metadata.BINARY_BYTE_MARSHALLER));
-
-            trailersMap.putString(key, new String(Base64.encode(data, Base64.NO_WRAP)));
-          } else if (!key.startsWith(":")) {
-            String data = trailers.get(Metadata.Key.of(key, Metadata.ASCII_STRING_MARSHALLER));
-
-            trailersMap.putString(key, data);
-          }
+        for (Map.Entry<String, Object> headerEntry : headers.toHashMap().entrySet()) {
+            headersMetadata.put(Metadata.Key.of(headerEntry.getKey(), Metadata.ASCII_STRING_MARSHALLER), headerEntry.getValue().toString());
         }
 
-        if (!status.isOk()) {
-          WritableMap errorEvent = Arguments.createMap();
+        MethodDescriptor.Marshaller<byte[]> marshaller = new GrpcMarshaller();
 
-          errorEvent.putInt("id", callId);
-          errorEvent.putString("type", "error");
-          errorEvent.putString("error", status.asException(trailers).getLocalizedMessage());
-          errorEvent.putInt("code", status.getCode().value());
-          errorEvent.putMap("trailers", trailersMap.copy());
+        MethodDescriptor descriptor = MethodDescriptor.<byte[], byte[]>newBuilder()
+                .setFullMethodName(path)
+                .setType(methodType)
+                .setRequestMarshaller(marshaller)
+                .setResponseMarshaller(marshaller)
+                .build();
 
-          emitEvent("grpc-call", errorEvent);
+        CallOptions callOptions = CallOptions.DEFAULT;
+
+        ClientCall call = this.getManagedChannel().newCall(descriptor, callOptions);
+
+        call.start(new ClientCall.Listener() {
+            @Override
+            public void onHeaders(Metadata headers) {
+                super.onHeaders(headers);
+
+                WritableMap event = Arguments.createMap();
+                WritableMap payload = Arguments.createMap();
+
+                for (String key : headers.keys()) {
+                    if (key.endsWith("-bin")) {
+                        byte[] data = headers.get(Metadata.Key.of(key, Metadata.BINARY_BYTE_MARSHALLER));
+
+                        payload.putString(key, new String(Base64.encode(data, Base64.NO_WRAP)));
+                    } else {
+                        String data = headers.get(Metadata.Key.of(key, Metadata.ASCII_STRING_MARSHALLER));
+
+                        payload.putString(key, data);
+                    }
+                }
+
+                event.putInt("id", id);
+                event.putString("type", "headers");
+                event.putMap("payload", payload);
+
+                emitEvent("grpc-call", event);
+            }
+
+            @Override
+            public void onMessage(Object messageObj) {
+                super.onMessage(messageObj);
+
+                byte[] data = (byte[]) messageObj;
+
+                WritableMap event = Arguments.createMap();
+
+                event.putInt("id", id);
+                event.putString("type", "response");
+                event.putString("payload", Base64.encodeToString(data, Base64.NO_WRAP));
+
+                emitEvent("grpc-call", event);
+
+                if (methodType == MethodDescriptor.MethodType.SERVER_STREAMING) {
+                    call.request(1);
+                }
+            }
+
+            @Override
+            public void onClose(Status status, Metadata trailers) {
+                super.onClose(status, trailers);
+
+                callsMap.remove(id);
+
+                WritableMap event = Arguments.createMap();
+                event.putInt("id", id);
+
+                WritableMap trailersMap = Arguments.createMap();
+
+                for (String key : trailers.keys()) {
+                    if (key.endsWith("-bin")) {
+                        byte[] data = trailers.get(Metadata.Key.of(key, Metadata.BINARY_BYTE_MARSHALLER));
+
+                        trailersMap.putString(key, new String(Base64.encode(data, Base64.NO_WRAP)));
+                    } else {
+                        String data = trailers.get(Metadata.Key.of(key, Metadata.ASCII_STRING_MARSHALLER));
+
+                        trailersMap.putString(key, data);
+                    }
+                }
+
+                if (!status.isOk()) {
+                    event.putString("type", "error");
+                    event.putString("error", status.asException(trailers).getLocalizedMessage());
+                    event.putInt("code", status.getCode().value());
+                    event.putMap("trailers", trailersMap);
+                } else {
+                    event.putString("type", "trailers");
+                    event.putMap("payload", trailersMap);
+                }
+
+                emitEvent("grpc-call", event);
+            }
+        }, headersMetadata);
+
+        return call;
+    }
+
+    private void emitEvent(String eventName, Object params) {
+        context
+                .getJSModule(DeviceEventManagerModule.RCTDeviceEventEmitter.class)
+                .emit(eventName, params);
+    }
+
+    private static String normalizePath(String path) {
+        if (path.startsWith("/")) {
+            path = path.substring(1);
         }
 
-        trailersEvent.putMap("payload", trailersMap);
-
-        emitEvent("grpc-call", trailersEvent);
-      }
-    }, headersMetadata);
-
-    if (settings.hasKey("compression") && settings.getBoolean("compression")) {
-      call.setMessageCompression(true);
+        return path;
     }
 
-    return call;
-  }
+    private ManagedChannel getManagedChannel() {
+        if (managedChannel != null) return managedChannel;
 
-  @ReactMethod
-  public void destroyClient(int id) {
-    if (this.connections.containsKey(id)) {
-      GrpcConnection connection = this.connections.get(id);
+        ManagedChannelBuilder channelBuilder = ManagedChannelBuilder.forTarget(this.host);
 
-      connection.getChannel().shutdown();
+        if (this.responseSizeLimit != null) {
+            channelBuilder = channelBuilder.maxInboundMessageSize(this.responseSizeLimit);
+        }
 
-      this.connections.remove(id);
+        if (this.isInsecure) {
+            channelBuilder = channelBuilder.usePlaintext();
+        }
+
+        managedChannel = channelBuilder.build();
+        return managedChannel;
     }
-  }
-
-  @ReactMethod
-  public void addListener(String eventName) {
-  }
-
-  @ReactMethod
-  public void removeListeners(Integer count) {
-  }
-
-  private void emitEvent(String eventName, Object params) {
-    context.getJSModule(DeviceEventManagerModule.RCTDeviceEventEmitter.class).emit(eventName, params);
-  }
-
-  private static String normalizePath(String path) {
-    if (path.startsWith("/")) {
-      path = path.substring(1);
-    }
-
-    return path;
-  }
-
-  private ManagedChannel createManagedChannel(int id, ReadableMap options) {
-    if (!options.hasKey("host")) {
-      throw new IllegalArgumentException("host is required");
-    }
-
-    String host = options.getString("host");
-
-    ManagedChannelBuilder channelBuilder = ManagedChannelBuilder.forTarget(host).executor(executor);
-
-    if (options.hasKey("insecure") && options.getBoolean("insecure")) {
-      channelBuilder = channelBuilder.usePlaintext();
-    }
-
-    if (options.hasKey("responseSizeLimit")) {
-      int responseSizeLimit = options.getInt("responseSizeLimit");
-
-      channelBuilder = channelBuilder.maxInboundMessageSize(responseSizeLimit);
-    }
-
-    boolean keepalive = true;
-
-    if (options.hasKey("keepalive")) {
-      keepalive = options.getBoolean("keepalive");
-    }
-
-    if (keepalive) {
-      int keepAliveTimeout = 20;
-      long keepaliveInterval = Long.MAX_VALUE;
-
-      if (options.hasKey("keepaliveInterval")) {
-        keepaliveInterval = options.getInt("keepaliveInterval");
-      }
-
-      if (options.hasKey("keepaliveTimeout")) {
-        keepAliveTimeout = options.getInt("keepaliveTimeout");
-      }
-
-      channelBuilder = channelBuilder
-        .keepAliveWithoutCalls(true)
-        .keepAliveTime(keepaliveInterval, TimeUnit.SECONDS)
-        .keepAliveTimeout(keepAliveTimeout, TimeUnit.SECONDS);
-    }
-
-    return channelBuilder.build();
-  }
 }

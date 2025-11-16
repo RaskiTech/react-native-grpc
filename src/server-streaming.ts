@@ -1,7 +1,7 @@
 /* eslint-disable eslint-comments/no-unlimited-disable */
 import { AbortController } from 'abort-controller';
 import { EventEmitter } from 'eventemitter3';
-import type {
+import {
   CompletedGrpcStreamingCall,
   GrpcMetadata,
   GrpcServerOutputStream,

@@ -1,4 +1,4 @@
-import type { GrpcMetadata } from './types';
+import { GrpcMetadata } from './types';
 
 export class GrpcError extends Error {
   constructor(

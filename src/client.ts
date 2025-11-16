@@ -1,46 +1,40 @@
 import AbortController from 'abort-controller';
 import { fromByteArray, toByteArray } from 'base64-js';
-import {
-  EmitterSubscription,
-  NativeEventEmitter,
-  NativeModules,
-} from 'react-native';
+import { NativeEventEmitter, NativeModules } from 'react-native';
 import { GrpcError } from './errors';
 import {
   GrpcServerStreamingCall,
   ServerOutputStream,
 } from './server-streaming';
-import type { GrpcClientSettings, GrpcMetadata } from './types';
+import { GrpcMetadata } from './types';
 import { GrpcUnaryCall } from './unary';
 
 type GrpcRequestObject = {
   data: string;
 };
-
-type GrpcOptions = GrpcClientSettings;
 type AbortSignal = any;
 
 type GrpcType = {
-  setGrpcSettings(id: number, settings: GrpcOptions): void;
-  destroyClient(id: number): void;
+  getHost: () => Promise<string>;
+  getIsInsecure: () => Promise<boolean>;
+  setHost(host: string): void;
+  setInsecure(insecure: boolean): void;
+  setResponseSizeLimit(limitInBytes: number): void;
   unaryCall(
-    callId: number,
-    clientId: number,
+    id: number,
     path: string,
     obj: GrpcRequestObject,
     requestHeaders?: GrpcMetadata
   ): Promise<void>;
   serverStreamingCall(
-    callId: number,
-    clientId: number,
+    id: number,
     path: string,
     obj: GrpcRequestObject,
     requestHeaders?: GrpcMetadata
   ): Promise<void>;
   cancelGrpcCall: (id: number) => Promise<boolean>;
   clientStreamingCall(
-    callId: number,
-    clientId: number,
+    id: number,
     path: string,
     obj: GrpcRequestObject,
     requestHeaders?: GrpcMetadata
@@ -81,7 +75,6 @@ const { Grpc } = NativeModules as { Grpc: GrpcType };
 const Emitter = new NativeEventEmitter(NativeModules.Grpc);
 
 type Deferred<T> = {
-  completed: boolean;
   promise: Promise<T>;
   resolve: (value: T) => void;
   reject: (reason: any) => void;
@@ -94,26 +87,30 @@ type DeferredCalls = {
   data?: ServerOutputStream;
 };
 
-type DeferredCallMap = Map<number, DeferredCalls>;
+type DeferredCallMap = {
+  [id: number]: DeferredCalls;
+};
 
 function createDeferred<T>(signal: AbortSignal) {
-  const deferred: Deferred<T> = { completed: false } as Deferred<T>;
+  let completed = false;
+
+  const deferred: Deferred<T> = {} as any;
 
   deferred.promise = new Promise<T>((resolve, reject) => {
     deferred.resolve = (value) => {
-      deferred.completed = true;
+      completed = true;
 
       resolve(value);
     };
     deferred.reject = (reason) => {
-      deferred.completed = true;
+      completed = true;
 
       reject(reason);
     };
   });
 
   signal.addEventListener('abort', () => {
-    if (!deferred.completed) {
+    if (!completed) {
       deferred.reject('aborted');
     }
   });
@@ -123,64 +120,67 @@ function createDeferred<T>(signal: AbortSignal) {
 
 let idCtr = 1;
 
+const deferredMap: DeferredCallMap = {};
+
+function handleGrpcEvent(event: GrpcEvent) {
+  const deferred = deferredMap[event.id];
+
+  if (deferred) {
+    switch (event.type) {
+      case 'headers':
+        deferred.headers?.resolve(event.payload);
+        break;
+      case 'response':
+        const data = toByteArray(event.payload);
+
+        deferred.data?.notifyData(data);
+        deferred.response?.resolve(data);
+        break;
+      case 'trailers':
+        deferred.trailers?.resolve(event.payload);
+        deferred.data?.notifyComplete();
+
+        delete deferredMap[event.id];
+        break;
+      case 'error':
+        const error = new GrpcError(event.error, event.code, event.trailers);
+
+        deferred.headers?.reject(error);
+        deferred.trailers?.reject(error);
+        deferred.response?.reject(error);
+        deferred.data?.noitfyError(error);
+
+        delete deferredMap[event.id];
+        break;
+    }
+  }
+}
+
 function getId(): number {
   return idCtr++;
 }
 
 export class GrpcClient {
-  #deferredMap: DeferredCallMap = new Map<number, DeferredCalls>();
-
-  #handleGrpcEvent = (event: GrpcEvent) => {
-    const deferred = this.#deferredMap.get(event.id);
-
-    if (deferred) {
-      switch (event.type) {
-        case 'headers':
-          deferred.headers?.resolve(event.payload);
-          break;
-        case 'response':
-          const data = toByteArray(event.payload);
-
-          deferred.data?.notifyData(data);
-          deferred.response?.resolve(data);
-          break;
-        case 'trailers':
-          deferred.trailers?.resolve(event.payload);
-          deferred.data?.notifyComplete();
-
-          this.#deferredMap.delete(event.id);
-          break;
-        case 'error':
-          const error = new GrpcError(event.error, event.code, event.trailers);
-
-          deferred.response?.reject(error);
-          deferred.data?.noitfyError(error);
-
-          break;
-      }
-    }
-  };
-
-  public clientId: number;
-
-  private callSubscription: EmitterSubscription;
-
-  constructor(settings: GrpcClientSettings) {
-    this.clientId = getId();
-    this.updateSettings(settings);
-
-    this.callSubscription = Emitter.addListener(
-      'grpc-call',
-      this.#handleGrpcEvent
-    );
+  constructor() {
+    Emitter.addListener('grpc-call', handleGrpcEvent);
   }
   destroy() {
-    Emitter.removeSubscription(this.callSubscription);
-
-    Grpc.destroyClient(this.clientId);
+    Emitter.removeAllListeners('grpc-call');
   }
-  updateSettings(settings: GrpcClientSettings) {
-    Grpc.setGrpcSettings(this.clientId, settings);
+  getHost(): Promise<string> {
+    return Grpc.getHost();
+  }
+  setHost(host: string): void {
+    Grpc.setHost(host);
+  }
+  getInsecure(): Promise<boolean> {
+    return Grpc.getIsInsecure();
+  }
+  setInsecure(insecure: boolean): void {
+    Grpc.setInsecure(insecure);
+  }
+  setResponseSizeLimit(limitInBytes: number): void {
+    Grpc.setResponseSizeLimit(limitInBytes);
   }
   unaryCall(
     method: string,
@@ -203,13 +203,13 @@ export class GrpcClient {
     const headers = createDeferred<GrpcMetadata>(abort.signal);
     const trailers = createDeferred<GrpcMetadata>(abort.signal);
 
-    this.#deferredMap.set(id, {
+    deferredMap[id] = {
       response,
       headers,
       trailers,
-    });
+    };
 
-    Grpc.unaryCall(id, this.clientId, method, obj, requestHeaders || {});
+    Grpc.unaryCall(id, method, obj, requestHeaders || {});
 
     const call = new GrpcUnaryCall(
       method,
@@ -219,6 +219,11 @@ export class GrpcClient {
       response.promise,
       trailers.promise,
       abort
+    );
+
+    call.then(
+      (result) => result,
+      () => abort.abort()
     );
 
     return call;
@@ -245,19 +250,13 @@ export class GrpcClient {
 
     const stream = new ServerOutputStream();
 
-    this.#deferredMap.set(id, {
+    deferredMap[id] = {
       headers,
       trailers,
       data: stream,
-    });
+    };
 
-    Grpc.serverStreamingCall(
-      id,
-      this.clientId,
-      method,
-      obj,
-      requestHeaders || {}
-    );
+    Grpc.serverStreamingCall(id, method, obj, requestHeaders || {});
 
     const call = new GrpcServerStreamingCall(
       method,
@@ -267,6 +266,11 @@ export class GrpcClient {
       stream,
       trailers.promise,
       abort
+    );
+
+    call.then(
+      (result) => result,
+      () => abort.abort()
     );
 
     return call;
