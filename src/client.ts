@@ -18,6 +18,7 @@ type GrpcRequestObject = {
 };
 
 type GrpcOptions = GrpcClientSettings;
+type AbortSignal = any;
 
 type GrpcType = {
   setGrpcSettings(id: number, settings: GrpcOptions): void;
